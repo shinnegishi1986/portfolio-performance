@@ -126,8 +126,10 @@ if "editor_df" not in st.session_state:
     st.session_state["editor_df"] = pd.DataFrame(columns=["Ticker", "Weight(%)"])
 if "new_ticker" not in st.session_state:
     st.session_state["new_ticker"] = ""
+if "auto_run_after_load" not in st.session_state:
+    st.session_state["auto_run_after_load"] = False
 
-st.title("Multi-Asset Portfolio Simulator (Enter to Add Ticker)")
+st.title("Multi-Asset Portfolio Simulator (Saved List Always Updated)")
 
 # ------------------ Sidebar: global settings ------------------
 st.sidebar.header("Portfolio Settings")
@@ -142,10 +144,13 @@ initial_capital = st.sidebar.number_input(
     step=1000.0,
 )
 
-capital_mode = st.sidebar.radio(
-    "Capital Allocation Mode",
-    ["Use Weights", "Equal Allocation if No Weights"],
-    index=1,
+weight_mode = st.sidebar.radio(
+    "Weight Mode",
+    [
+        "Use specified weights (normalized)",
+        "Force equal weight (ignore specified weights)",
+    ],
+    index=0,
 )
 
 today = date.today()
@@ -185,9 +190,10 @@ interval = st.sidebar.selectbox(
 st.sidebar.markdown("---")
 st.sidebar.caption("Data source: Yahoo Finance via yfinance")
 
-# ------------- Sidebar: Saved portfolio loader -------------
+# ------------- Sidebar: Saved portfolio loader + New portfolio -------------
 st.sidebar.subheader("Saved Portfolios")
 
+# This always re-queries the DB so newly saved portfolios are listed
 existing_names = load_portfolio_names()
 selected_saved = st.sidebar.selectbox(
     "Load saved portfolio",
@@ -195,20 +201,30 @@ selected_saved = st.sidebar.selectbox(
     index=0,
 )
 
-if selected_saved != "(None)":
-    if st.sidebar.button("Load Selected Portfolio"):
-        data = load_portfolio_by_name(selected_saved)
-        if data:
-            st.session_state["loaded_portfolio"] = data
-            st.session_state["editor_df"] = pd.DataFrame(
-                {
-                    "Ticker": data["tickers"],
-                    "Weight(%)": data["weights"] * 100.0,
-                }
-            )
-            st.success(f"Loaded portfolio: {selected_saved}")
-        else:
-            st.error("Failed to load portfolio data.")
+load_clicked = st.sidebar.button("Load Selected Portfolio")
+new_clicked = st.sidebar.button("Create New Portfolio")
+
+if load_clicked and selected_saved != "(None)":
+    data = load_portfolio_by_name(selected_saved)
+    if data:
+        st.session_state["loaded_portfolio"] = data
+        st.session_state["editor_df"] = pd.DataFrame(
+            {
+                "Ticker": data["tickers"],
+                "Weight(%)": data["weights"] * 100.0,
+            }
+        )
+        st.session_state["auto_run_after_load"] = True
+        st.success(f"Loaded portfolio: {selected_saved}")
+    else:
+        st.error("Failed to load portfolio data.")
+
+if new_clicked:
+    st.session_state["loaded_portfolio"] = None
+    st.session_state["editor_df"] = pd.DataFrame(columns=["Ticker", "Weight(%)"])
+    st.session_state["new_ticker"] = ""
+    st.session_state["auto_run_after_load"] = False
+    st.rerun()
 
 # ------------------ Helper to clean yfinance data ------------------
 def clean_yf_df(raw_df: pd.DataFrame) -> pd.Series:
@@ -279,7 +295,6 @@ def add_ticker_from_input():
 # ------------------ Portfolio editor UI ------------------
 st.header("1. Edit Portfolio (Tickers & Weights)")
 
-# Use 3 columns so button aligns next to the text input
 c1, c2, c3 = st.columns([6, 1.2, 0.8])
 with c1:
     st.text_input(
@@ -288,17 +303,16 @@ with c1:
         on_change=add_ticker_from_input,
     )
 with c2:
-    st.write("")  # small spacer to vertically align
+    st.write("")
     if st.button("Add", key="add_ticker_btn"):
         add_ticker_from_input()
 with c3:
-    st.write("")  # empty, keeps layout tighter
+    st.write("")
 
 editor_df = st.session_state["editor_df"]
 
 st.write(
-    "Add tickers with the input above (Enter or Add button), delete rows in the table, "
-    "and edit Ticker / Weight(%) cells directly."
+    "Edit Weight(%) cells. You can force equal weight in the sidebar even if some weights are specified."
 )
 
 edited_df = st.data_editor(
@@ -307,13 +321,11 @@ edited_df = st.data_editor(
     key="portfolio_editor",
 )
 
-st.session_state["editor_df"] = edited_df
-
 # ------------------ Portfolio meta: name & title are same ------------------
 st.subheader("Portfolio Name / Title")
 
 if loaded:
-    default_name_title = loaded["title"] or loaded.get("name", "")
+    default_name_title = loaded["title"] or ""
 else:
     default_name_title = ""
 
@@ -321,8 +333,6 @@ portfolio_name_title = st.text_input(
     "Portfolio Name (also used as Title; if blank will become 'Untitled portfolio N')",
     value=default_name_title,
 )
-
-use_percentage = st.checkbox("Weights are in % (this editor is in %)", value=True)
 
 run_col, save_col = st.columns([2, 1])
 run_clicked = run_col.button("Run Portfolio Simulation")
@@ -340,25 +350,22 @@ def parse_from_editor(df: pd.DataFrame):
     raw_weights = df["Weight(%)"].tolist() if "Weight(%)" in df.columns else [None] * len(tickers)
     return tickers, raw_weights
 
-def determine_weights(tickers, raw_weights, use_pct, mode):
+def determine_weights(tickers, raw_weights, mode: str):
     n = len(tickers)
     if n == 0:
         return np.array([])
 
+    if mode == "Force equal weight (ignore specified weights)":
+        return np.ones(n, dtype=float) / n
+
     weights = np.zeros(n, dtype=float)
-    if any(w is not None for w in raw_weights) and mode == "Use Weights":
+    if any(w is not None for w in raw_weights):
         tmp = np.array([0.0 if w is None else float(w) for w in raw_weights], dtype=float)
         total = tmp.sum()
-        if use_pct:
-            if total <= 0:
-                weights[:] = 1.0 / n
-            else:
-                weights = tmp / total
+        if total <= 0:
+            weights[:] = 1.0 / n
         else:
-            if total <= 0:
-                weights[:] = 1.0 / n
-            else:
-                weights = tmp / total
+            weights = tmp / total
     else:
         weights[:] = 1.0 / n
     return weights
@@ -369,154 +376,171 @@ def resolve_name_and_title(raw: str) -> str:
         name = generate_untitled_name()
     return name
 
-# ------------------ Save current definition ------------------
-if save_clicked:
-    tickers, raw_weights = parse_from_editor(st.session_state["editor_df"])
+def maybe_save_portfolio(tickers, raw_weights, action_label: str):
     if len(tickers) == 0:
+        return
+    weights = determine_weights(tickers, raw_weights, weight_mode)
+    name_title = resolve_name_and_title(portfolio_name_title)
+    ok, msg = save_portfolio(
+        name_title,
+        name_title,
+        tickers,
+        weights,
+        initial_capital,
+        start_dt,
+        end_dt,
+        interval,
+    )
+    if ok:
+        st.session_state["editor_df"] = edited_df
+        st.success(f"{msg} (saved as: {name_title}) via {action_label}")
+    else:
+        st.error(msg)
+
+def run_simulation(tickers, raw_weights):
+    if len(tickers) == 0:
+        st.error("Please input at least one valid ticker.")
+        return
+
+    weights = determine_weights(tickers, raw_weights, weight_mode)
+
+    price_df = pd.DataFrame()
+    failed_tickers = []
+
+    for t in tickers:
+        try:
+            data = yf.download(
+                t,
+                start=start_dt,
+                end=end_dt,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+            )
+            close_series = clean_yf_df(data)
+            if close_series.empty:
+                failed_tickers.append(t)
+                continue
+            price_df[t] = close_series
+        except Exception:
+            failed_tickers.append(t)
+
+    if price_df.empty:
+        st.error("No valid price data could be downloaded for the given tickers and date range.")
+        return
+
+    price_df.dropna(how="all", inplace=True)
+
+    valid_mask = [t in price_df.columns for t in tickers]
+    tickers = [t for t, ok in zip(tickers, valid_mask) if ok]
+    weights = np.array([w for w, ok in zip(weights, valid_mask) if ok], dtype=float)
+
+    if len(tickers) == 0:
+        st.error("All tickers failed to download data.")
+        return
+
+    if weights.sum() <= 0:
+        weights[:] = 1.0 / len(tickers)
+    else:
+        weights = weights / weights.sum()
+
+    price_df = price_df[tickers]
+
+    first_prices = price_df.iloc[0]
+    alloc_capital = initial_capital * weights
+    shares = alloc_capital / first_prices.values
+
+    portfolio_values = (price_df.values * shares).sum(axis=1)
+    portfolio_series = pd.Series(portfolio_values, index=price_df.index, name="PortfolioValue")
+
+    total_return = (portfolio_series.iloc[-1] / portfolio_series.iloc[0]) - 1.0
+    pnl = portfolio_series.iloc[-1] - initial_capital
+
+    st.header("2. Portfolio Results")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Initial Investment", f"{initial_capital:,.2f}")
+    col2.metric("Final Portfolio Value", f"{portfolio_series.iloc[-1]:,.2f}")
+    col3.metric("Total Return", f"{total_return * 100:.2f}%")
+
+    st.metric("Profit / Loss", f"{pnl:,.2f}")
+
+    alloc_df = pd.DataFrame(
+        {
+            "Ticker": tickers,
+            "Weight": weights,
+            "Allocated Capital": alloc_capital,
+            "Shares": shares,
+        }
+    )
+    st.subheader("Portfolio Allocation (Effective)")
+    st.dataframe(
+        alloc_df.style.format(
+            {
+                "Weight": "{:.2%}",
+                "Allocated Capital": "{:,.2f}",
+                "Shares": "{:.4f}",
+            }
+        )
+    )
+
+    if failed_tickers:
+        st.warning(f"No data for: {', '.join(failed_tickers)} (ignored).")
+
+    st.header("3. Charts")
+
+    fig_prices = go.Figure()
+    for t in price_df.columns:
+        fig_prices.add_trace(
+            go.Scatter(
+                x=price_df.index,
+                y=price_df[t],
+                mode="lines",
+                name=t,
+            )
+        )
+    fig_prices.update_layout(
+        title="Individual Asset Prices",
+        xaxis_title="Date",
+        yaxis_title="Price",
+        legend_title="Ticker",
+    )
+    st.plotly_chart(fig_prices, use_container_width=True)
+
+    fig_port = go.Figure()
+    fig_port.add_trace(
+        go.Scatter(
+            x=portfolio_series.index,
+            y=portfolio_series.values,
+            mode="lines",
+            name="Portfolio Value",
+        )
+    )
+    fig_port.update_layout(
+        title="Portfolio Total Value Over Time",
+        xaxis_title="Date",
+        yaxis_title="Portfolio Value",
+    )
+    st.plotly_chart(fig_port, use_container_width=True)
+
+# ------------------ Save button ------------------
+if save_clicked:
+    tks, rws = parse_from_editor(edited_df)
+    if len(tks) == 0:
         st.error("Cannot save: please input at least one valid ticker.")
     else:
-        weights = determine_weights(tickers, raw_weights, use_percentage, capital_mode)
-        name_title = resolve_name_and_title(portfolio_name_title)
-        ok, msg = save_portfolio(
-            name_title,
-            name_title,
-            tickers,
-            weights,
-            initial_capital,
-            start_dt,
-            end_dt,
-            interval,
-        )
-        if ok:
-            st.success(f"{msg} (saved as: {name_title})")
-        else:
-            st.error(msg)
+        maybe_save_portfolio(tks, rws, "Save button")
 
-# ------------------ Run simulation ------------------
+# ------------------ Run button (also auto-save) ------------------
 if run_clicked:
-    tickers, raw_weights = parse_from_editor(st.session_state["editor_df"])
+    tickers, raw_weights = parse_from_editor(edited_df)
     if len(tickers) == 0:
         st.error("Please input at least one valid ticker.")
     else:
-        weights = determine_weights(tickers, raw_weights, use_percentage, capital_mode)
-
-        price_df = pd.DataFrame()
-        failed_tickers = []
-
-        for t in tickers:
-            try:
-                data = yf.download(
-                    t,
-                    start=start_dt,
-                    end=end_dt,
-                    interval=interval,
-                    auto_adjust=False,
-                    progress=False,
-                )
-                close_series = clean_yf_df(data)
-                if close_series.empty:
-                    failed_tickers.append(t)
-                    continue
-                price_df[t] = close_series
-            except Exception:
-                failed_tickers.append(t)
-
-        if price_df.empty:
-            st.error("No valid price data could be downloaded for the given tickers and date range.")
-        else:
-            price_df.dropna(how="all", inplace=True)
-
-            valid_mask = [t in price_df.columns for t in tickers]
-            tickers = [t for t, ok in zip(tickers, valid_mask) if ok]
-            weights = np.array([w for w, ok in zip(weights, valid_mask) if ok], dtype=float)
-
-            if len(tickers) == 0:
-                st.error("All tickers failed to download data.")
-            else:
-                if weights.sum() <= 0:
-                    weights[:] = 1.0 / len(tickers)
-                else:
-                    weights = weights / weights.sum()
-
-                price_df = price_df[tickers]
-
-                first_prices = price_df.iloc[0]
-                alloc_capital = initial_capital * weights
-                shares = alloc_capital / first_prices.values
-
-                portfolio_values = (price_df.values * shares).sum(axis=1)
-                portfolio_series = pd.Series(portfolio_values, index=price_df.index, name="PortfolioValue")
-
-                total_return = (portfolio_series.iloc[-1] / portfolio_series.iloc[0]) - 1.0
-                pnl = portfolio_series.iloc[-1] - initial_capital
-
-                st.header("2. Portfolio Results")
-
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Initial Investment", f"{initial_capital:,.2f}")
-                col2.metric("Final Portfolio Value", f"{portfolio_series.iloc[-1]:,.2f}")
-                col3.metric("Total Return", f"{total_return * 100:.2f}%")
-
-                st.metric("Profit / Loss", f"{pnl:,.2f}")
-
-                alloc_df = pd.DataFrame(
-                    {
-                        "Ticker": tickers,
-                        "Weight": weights,
-                        "Allocated Capital": alloc_capital,
-                        "Shares": shares,
-                    }
-                )
-                st.subheader("Portfolio Allocation (Effective)")
-                st.dataframe(
-                    alloc_df.style.format(
-                        {
-                            "Weight": "{:.2%}",
-                            "Allocated Capital": "{:,.2f}",
-                            "Shares": "{:.4f}",
-                        }
-                    )
-                )
-
-                if failed_tickers:
-                    st.warning(f"No data for: {', '.join(failed_tickers)} (ignored).")
-
-                st.header("3. Charts")
-
-                fig_prices = go.Figure()
-                for t in price_df.columns:
-                    fig_prices.add_trace(
-                        go.Scatter(
-                            x=price_df.index,
-                            y=price_df[t],
-                            mode="lines",
-                            name=t,
-                        )
-                    )
-                fig_prices.update_layout(
-                    title="Individual Asset Prices",
-                    xaxis_title="Date",
-                    yaxis_title="Price",
-                    legend_title="Ticker",
-                )
-                st.plotly_chart(fig_prices, use_container_width=True)
-
-                fig_port = go.Figure()
-                fig_port.add_trace(
-                    go.Scatter(
-                        x=portfolio_series.index,
-                        y=portfolio_series.values,
-                        mode="lines",
-                        name="Portfolio Value",
-                    )
-                )
-                fig_port.update_layout(
-                    title="Portfolio Total Value Over Time",
-                    xaxis_title="Date",
-                    yaxis_title="Portfolio Value",
-                )
-                st.plotly_chart(fig_port, use_container_width=True)
-else:
-    st.info(
-        "Type a ticker and press Enter or click Add. The button is now aligned next to the input."
-    )
+        maybe_save_portfolio(tickers, raw_weights, "Run Portfolio Simulation")
+        run_simulation(tickers, raw_weights)
+elif st.session_state.get("auto_run_after_load", False):
+    tickers, raw_weights = parse_from_editor(edited_df)
+    if len(tickers) > 0:
+        run_simulation(tickers, raw_weights)
+    st.session_state["auto_run_after_load"] = False
