@@ -139,6 +139,8 @@ if "new_ticker" not in st.session_state:
     st.session_state["new_ticker"] = ""
 if "auto_run_after_load" not in st.session_state:
     st.session_state["auto_run_after_load"] = False
+if "portfolio_name" not in st.session_state:
+    st.session_state["portfolio_name"] = ""
 
 st.title("Multi-Asset Portfolio Simulator")
 
@@ -207,6 +209,8 @@ if st.sidebar.button("Load Selected Portfolio") and selected_saved != "(None)":
                 "Weight(%)": data["weights"] * 100.0,
             }
         )
+        # set portfolio name into session_state so input reflects it
+        st.session_state["portfolio_name"] = data["title"] or ""
         st.session_state["auto_run_after_load"] = True
         st.success(f"Loaded: {selected_saved}")
         st.rerun()
@@ -216,6 +220,8 @@ if st.sidebar.button("Create New Portfolio"):
     st.session_state["editor_df"] = pd.DataFrame(columns=["Ticker", "Weight(%)"])
     st.session_state["new_ticker"] = ""
     st.session_state["auto_run_after_load"] = False
+    # clear Portfolio Name
+    st.session_state["portfolio_name"] = ""
     st.rerun()
 
 # ------------------ Helper to clean yfinance data ------------------
@@ -263,13 +269,8 @@ def add_ticker_from_input():
 # ------------------ UI Components ------------------
 st.header("1. Edit Portfolio")
 
-c1, c2 = st.columns([5, 1])
-with c1:
-    st.text_input("Add Ticker (e.g. AAPL)", key="new_ticker", on_change=add_ticker_from_input)
-with c2:
-    st.write("##")
-    if st.button("Add"):
-        add_ticker_from_input()
+# Add ticker only via Enter
+st.text_input("Add Ticker (e.g. AAPL)", key="new_ticker", on_change=add_ticker_from_input)
 
 edited_df = st.data_editor(
     st.session_state["editor_df"],
@@ -277,9 +278,10 @@ edited_df = st.data_editor(
     key="portfolio_editor"
 )
 
+# bind Portfolio Name to session_state["portfolio_name"] so it can be cleared
 portfolio_name_title = st.text_input(
     "Portfolio Name",
-    value=loaded["title"] if loaded else ""
+    key="portfolio_name"
 )
 
 run_col, save_col = st.columns([1, 1])
@@ -365,7 +367,6 @@ def run_simulation(tickers, raw_weights):
     price_df = price_df[tickers]
 
     # ---------- Percent performance (cumulative %) ----------
-    # (Price / Start_Price - 1) * 100
     percent_df = (price_df / price_df.iloc[0] - 1.0) * 100.0
 
     # ---------- Portfolio Value Calculation ----------
@@ -415,7 +416,7 @@ def run_simulation(tickers, raw_weights):
     # ---------- Charts ----------
     st.header("3. Charts")
 
-    # 3-1 Individual asset price performance (existing chart)
+    # 3-1 Individual asset price performance
     st.subheader("Asset Price Performance")
     fig_prices = go.Figure()
     for col in price_df.columns:
@@ -502,7 +503,7 @@ def run_simulation(tickers, raw_weights):
 if save_clicked:
     tks, rws = parse_from_editor(edited_df)
     if tks:
-        name = resolve_name_and_title(portfolio_name_title)
+        name = resolve_name_and_title(st.session_state["portfolio_name"])
         w = determine_weights(tks, rws, weight_mode)
         ok, msg = save_portfolio(name, name, tks, w, initial_capital, start_dt, end_dt, interval)
         if ok:
