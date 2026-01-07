@@ -129,7 +129,7 @@ if "new_ticker" not in st.session_state:
 if "auto_run_after_load" not in st.session_state:
     st.session_state["auto_run_after_load"] = False
 
-st.title("Multi-Asset Portfolio Simulator (Saved List Always Updated)")
+st.title("Multi-Asset Portfolio Simulator")
 
 # ------------------ Sidebar: global settings ------------------
 st.sidebar.header("Portfolio Settings")
@@ -163,22 +163,11 @@ else:
     default_start = default_from
     default_end = today
 
-start_dt_input = st.sidebar.date_input(
-    "From Date (optional)",
-    value=default_start if loaded else None,
-)
-end_dt_input = st.sidebar.date_input(
-    "To Date (optional)",
-    value=default_end if loaded else None,
-)
+start_dt_input = st.sidebar.date_input("From Date", value=default_start)
+end_dt_input = st.sidebar.date_input("To Date", value=default_end)
 
-start_dt = start_dt_input[0] if isinstance(start_dt_input, (list, tuple)) and start_dt_input else start_dt_input
-end_dt = end_dt_input[0] if isinstance(end_dt_input, (list, tuple)) and end_dt_input else end_dt_input
-
-if start_dt is None:
-    start_dt = default_from
-if end_dt is None:
-    end_dt = today
+start_dt = start_dt_input
+end_dt = end_dt_input
 
 default_interval = loaded["interval"] if loaded else "1d"
 interval = st.sidebar.selectbox(
@@ -188,12 +177,8 @@ interval = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Data source: Yahoo Finance via yfinance")
-
-# ------------- Sidebar: Saved portfolio loader + New portfolio -------------
 st.sidebar.subheader("Saved Portfolios")
 
-# This always re-queries the DB so newly saved portfolios are listed
 existing_names = load_portfolio_names()
 selected_saved = st.sidebar.selectbox(
     "Load saved portfolio",
@@ -201,10 +186,7 @@ selected_saved = st.sidebar.selectbox(
     index=0,
 )
 
-load_clicked = st.sidebar.button("Load Selected Portfolio")
-new_clicked = st.sidebar.button("Create New Portfolio")
-
-if load_clicked and selected_saved != "(None)":
+if st.sidebar.button("Load Selected Portfolio") and selected_saved != "(None)":
     data = load_portfolio_by_name(selected_saved)
     if data:
         st.session_state["loaded_portfolio"] = data
@@ -215,11 +197,10 @@ if load_clicked and selected_saved != "(None)":
             }
         )
         st.session_state["auto_run_after_load"] = True
-        st.success(f"Loaded portfolio: {selected_saved}")
-    else:
-        st.error("Failed to load portfolio data.")
+        st.success(f"Loaded: {selected_saved}")
+        st.rerun()
 
-if new_clicked:
+if st.sidebar.button("Create New Portfolio"):
     st.session_state["loaded_portfolio"] = None
     st.session_state["editor_df"] = pd.DataFrame(columns=["Ticker", "Weight(%)"])
     st.session_state["new_ticker"] = ""
@@ -230,317 +211,130 @@ if new_clicked:
 def clean_yf_df(raw_df: pd.DataFrame) -> pd.Series:
     if raw_df is None or raw_df.empty:
         return pd.Series(dtype=float)
-
     df_ = raw_df.copy()
-
     if isinstance(df_.columns, pd.MultiIndex):
-        cols = list(df_.columns)
-        if any(c[0] in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] for c in cols):
-            tmp = {}
-            for price, ticker in cols:
-                if price in ["Open", "High", "Low", "Close", "Adj Close"]:
-                    tmp[price] = df_[(price, ticker)]
-            df_ = pd.DataFrame(tmp, index=df_.index)
-        elif any(c[1] in ["Open", "High", "Low", "Close", "Adj Close", "Volume"] for c in cols):
-            tmp = {}
-            for ticker, price in cols:
-                if price in ["Open", "High", "Low", "Close", "Adj Close"]:
-                    tmp[price] = df_[(ticker, price)]
-            df_ = pd.DataFrame(tmp, index=df_.index)
-        else:
-            df_.columns = [" ".join([str(x) for x in c]).strip() for c in cols]
-
-    if isinstance(df_.columns, pd.MultiIndex):
-        df_.columns = [" ".join([str(x) for x in c]).strip() for c in df_.columns]
-
+        df_.columns = df_.columns.get_level_values(0)
+    
     col_map = {}
     for c in df_.columns:
-        c_lower = c.lower()
-        if " adj close" in c_lower or c_lower == "adj close":
-            col_map[c] = "Adj Close"
-        elif " close" in c_lower and "adj" not in c_lower:
-            col_map[c] = "Close"
+        c_lower = str(c).lower()
+        if "adj close" in c_lower: col_map[c] = "Adj Close"
+        elif "close" in c_lower: col_map[c] = "Close"
+    
     if col_map:
         df_.rename(columns=col_map, inplace=True)
+    
+    target_col = "Adj Close" if "Adj Close" in df_.columns else "Close"
+    if target_col not in df_.columns:
+        return pd.Series(dtype=float)
+    
+    return df_[target_col].dropna()
 
-    if "Close" not in df_.columns:
-        if "Adj Close" in df_.columns:
-            df_["Close"] = df_["Adj Close"]
-        else:
-            return pd.Series(dtype=float)
-
-    if not isinstance(df_.index, pd.DatetimeIndex):
-        try:
-            df_.index = pd.to_datetime(df_.index)
-        except Exception:
-            pass
-
-    return df_["Close"].dropna()
-
-# ------------------ Add ticker via Enter or button ------------------
 def add_ticker_from_input():
     t = st.session_state["new_ticker"].strip().upper()
-    if not t:
-        return
+    if not t: return
     df = st.session_state["editor_df"].copy()
-    if "Ticker" not in df.columns:
-        df = pd.DataFrame(columns=["Ticker", "Weight(%)"])
     if t not in df["Ticker"].astype(str).tolist():
         df.loc[len(df)] = [t, 0.0]
         st.session_state["editor_df"] = df
-    else:
-        st.warning(f"{t} is already in the portfolio.")
     st.session_state["new_ticker"] = ""
 
-# ------------------ Portfolio editor UI ------------------
-st.header("1. Edit Portfolio (Tickers & Weights)")
-
-c1, c2, c3 = st.columns([6, 1.2, 0.8])
+# ------------------ UI Components ------------------
+st.header("1. Edit Portfolio")
+c1, c2 = st.columns([5, 1])
 with c1:
-    st.text_input(
-        "Add Ticker (e.g. AAPL) and press Enter",
-        key="new_ticker",
-        on_change=add_ticker_from_input,
-    )
+    st.text_input("Add Ticker (e.g. AAPL)", key="new_ticker", on_change=add_ticker_from_input)
 with c2:
-    st.write("")
-    if st.button("Add", key="add_ticker_btn"):
-        add_ticker_from_input()
-with c3:
-    st.write("")
+    st.write("##")
+    if st.button("Add"): add_ticker_from_input()
 
-editor_df = st.session_state["editor_df"]
+edited_df = st.data_editor(st.session_state["editor_df"], num_rows="dynamic", key="portfolio_editor")
 
-st.write(
-    "Edit Weight(%) cells. You can force equal weight in the sidebar even if some weights are specified."
-)
+portfolio_name_title = st.text_input("Portfolio Name", value=loaded["title"] if loaded else "")
 
-edited_df = st.data_editor(
-    editor_df,
-    num_rows="dynamic",
-    key="portfolio_editor",
-)
+run_col, save_col = st.columns([1, 1])
+run_clicked = run_col.button("Run Simulation", use_container_width=True)
+save_clicked = save_col.button("Save Portfolio", use_container_width=True)
 
-# ------------------ Portfolio meta: name & title are same ------------------
-st.subheader("Portfolio Name / Title")
-
-if loaded:
-    default_name_title = loaded["title"] or ""
-else:
-    default_name_title = ""
-
-portfolio_name_title = st.text_input(
-    "Portfolio Name (also used as Title; if blank will become 'Untitled portfolio N')",
-    value=default_name_title,
-)
-
-run_col, save_col = st.columns([2, 1])
-run_clicked = run_col.button("Run Portfolio Simulation")
-save_clicked = save_col.button("Save / Update Portfolio in SQLite")
-
-# ------------------ helpers ------------------
+# ------------------ Logic Helpers ------------------
 def parse_from_editor(df: pd.DataFrame):
-    df = df.copy()
-    if "Ticker" not in df.columns:
-        return [], []
     df = df.dropna(subset=["Ticker"])
-    df["Ticker"] = df["Ticker"].astype(str).str.strip()
-    df = df[df["Ticker"] != ""]
-    tickers = df["Ticker"].tolist()
-    raw_weights = df["Weight(%)"].tolist() if "Weight(%)" in df.columns else [None] * len(tickers)
+    tickers = df["Ticker"].astype(str).str.strip().tolist()
+    tickers = [t for t in tickers if t != ""]
+    raw_weights = df["Weight(%)"].tolist() if "Weight(%)" in df.columns else [0] * len(tickers)
     return tickers, raw_weights
 
-def determine_weights(tickers, raw_weights, mode: str):
+def determine_weights(tickers, raw_weights, mode):
     n = len(tickers)
-    if n == 0:
-        return np.array([])
-
+    if n == 0: return np.array([])
     if mode == "Force equal weight (ignore specified weights)":
-        return np.ones(n, dtype=float) / n
-
-    weights = np.zeros(n, dtype=float)
-    if any(w is not None for w in raw_weights):
-        tmp = np.array([0.0 if w is None else float(w) for w in raw_weights], dtype=float)
-        total = tmp.sum()
-        if total <= 0:
-            weights[:] = 1.0 / n
-        else:
-            weights = tmp / total
-    else:
-        weights[:] = 1.0 / n
-    return weights
-
-def resolve_name_and_title(raw: str) -> str:
-    name = (raw or "").strip()
-    if not name:
-        name = generate_untitled_name()
-    return name
-
-def maybe_save_portfolio(tickers, raw_weights, action_label: str):
-    if len(tickers) == 0:
-        return
-    weights = determine_weights(tickers, raw_weights, weight_mode)
-    name_title = resolve_name_and_title(portfolio_name_title)
-    ok, msg = save_portfolio(
-        name_title,
-        name_title,
-        tickers,
-        weights,
-        initial_capital,
-        start_dt,
-        end_dt,
-        interval,
-    )
-    if ok:
-        st.session_state["editor_df"] = edited_df
-        st.success(f"{msg} (saved as: {name_title}) via {action_label}")
-    else:
-        st.error(msg)
+        return np.ones(n) / n
+    w = np.array([float(x) if x else 0.0 for x in raw_weights])
+    return w / w.sum() if w.sum() > 0 else np.ones(n) / n
 
 def run_simulation(tickers, raw_weights):
-    if len(tickers) == 0:
-        st.error("Please input at least one valid ticker.")
-        return
-
     weights = determine_weights(tickers, raw_weights, weight_mode)
-
     price_df = pd.DataFrame()
-    failed_tickers = []
-
+    
     for t in tickers:
-        try:
-            data = yf.download(
-                t,
-                start=start_dt,
-                end=end_dt,
-                interval=interval,
-                auto_adjust=False,
-                progress=False,
-            )
-            close_series = clean_yf_df(data)
-            if close_series.empty:
-                failed_tickers.append(t)
-                continue
-            price_df[t] = close_series
-        except Exception:
-            failed_tickers.append(t)
+        data = yf.download(t, start=start_dt, end=end_dt, interval=interval, progress=False)
+        series = clean_yf_df(data)
+        if not series.empty:
+            price_df[t] = series
 
     if price_df.empty:
-        st.error("No valid price data could be downloaded for the given tickers and date range.")
+        st.error("No data found.")
         return
 
-    price_df.dropna(how="all", inplace=True)
+    price_df.ffill(inplace=True)
+    price_df.dropna(inplace=True)
+    
+    # Calculate returns for the Chart (Performance by Percent)
+    # Formula: (Price / Start_Price - 1) * 100
+    percent_df = (price_df / price_df.iloc[0] - 1) * 100
 
-    valid_mask = [t in price_df.columns for t in tickers]
-    tickers = [t for t, ok in zip(tickers, valid_mask) if ok]
-    weights = np.array([w for w, ok in zip(weights, valid_mask) if ok], dtype=float)
+    # Portfolio Value Calculation
+    alloc = initial_capital * weights
+    shares = alloc / price_df.iloc[0].values
+    portfolio_value = (price_df * shares).sum(axis=1)
 
-    if len(tickers) == 0:
-        st.error("All tickers failed to download data.")
-        return
+    st.header("2. Results")
+    m1, m2, m3 = st.columns(3)
+    final_val = portfolio_value.iloc[-1]
+    ret = (final_val / initial_capital - 1) * 100
+    m1.metric("Initial", f"${initial_capital:,.2f}")
+    m2.metric("Final", f"${final_val:,.2f}")
+    m3.metric("Return", f"{ret:.2f}%")
 
-    if weights.sum() <= 0:
-        weights[:] = 1.0 / len(tickers)
-    else:
-        weights = weights / weights.sum()
+    st.header("3. Performance Comparison (%)")
+    fig_pct = go.Figure()
+    for col in percent_df.columns:
+        fig_pct.add_trace(go.Scatter(x=percent_df.index, y=percent_df[col], name=col, mode='lines'))
+    fig_pct.update_layout(title="Asset Growth Comparison (Cumulative %)", yaxis_title="Return %", hovermode="x unified")
+    st.plotly_chart(fig_pct, use_container_width=True)
 
-    price_df = price_df[tickers]
+    st.header("4. Portfolio Total Value ($)")
+    fig_val = go.Figure()
+    fig_val.add_trace(go.Scatter(x=portfolio_value.index, y=portfolio_value, name="Portfolio", fill='tozeroy'))
+    fig_val.update_layout(yaxis_title="Total Value ($)")
+    st.plotly_chart(fig_val, use_container_width=True)
 
-    first_prices = price_df.iloc[0]
-    alloc_capital = initial_capital * weights
-    shares = alloc_capital / first_prices.values
-
-    portfolio_values = (price_df.values * shares).sum(axis=1)
-    portfolio_series = pd.Series(portfolio_values, index=price_df.index, name="PortfolioValue")
-
-    total_return = (portfolio_series.iloc[-1] / portfolio_series.iloc[0]) - 1.0
-    pnl = portfolio_series.iloc[-1] - initial_capital
-
-    st.header("2. Portfolio Results")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Initial Investment", f"{initial_capital:,.2f}")
-    col2.metric("Final Portfolio Value", f"{portfolio_series.iloc[-1]:,.2f}")
-    col3.metric("Total Return", f"{total_return * 100:.2f}%")
-
-    st.metric("Profit / Loss", f"{pnl:,.2f}")
-
-    alloc_df = pd.DataFrame(
-        {
-            "Ticker": tickers,
-            "Weight": weights,
-            "Allocated Capital": alloc_capital,
-            "Shares": shares,
-        }
-    )
-    st.subheader("Portfolio Allocation (Effective)")
-    st.dataframe(
-        alloc_df.style.format(
-            {
-                "Weight": "{:.2%}",
-                "Allocated Capital": "{:,.2f}",
-                "Shares": "{:.4f}",
-            }
-        )
-    )
-
-    if failed_tickers:
-        st.warning(f"No data for: {', '.join(failed_tickers)} (ignored).")
-
-    st.header("3. Charts")
-
-    fig_prices = go.Figure()
-    for t in price_df.columns:
-        fig_prices.add_trace(
-            go.Scatter(
-                x=price_df.index,
-                y=price_df[t],
-                mode="lines",
-                name=t,
-            )
-        )
-    fig_prices.update_layout(
-        title="Individual Asset Prices",
-        xaxis_title="Date",
-        yaxis_title="Price",
-        legend_title="Ticker",
-    )
-    st.plotly_chart(fig_prices, use_container_width=True)
-
-    fig_port = go.Figure()
-    fig_port.add_trace(
-        go.Scatter(
-            x=portfolio_series.index,
-            y=portfolio_series.values,
-            mode="lines",
-            name="Portfolio Value",
-        )
-    )
-    fig_port.update_layout(
-        title="Portfolio Total Value Over Time",
-        xaxis_title="Date",
-        yaxis_title="Portfolio Value",
-    )
-    st.plotly_chart(fig_port, use_container_width=True)
-
-# ------------------ Save button ------------------
+# ------------------ Actions ------------------
 if save_clicked:
     tks, rws = parse_from_editor(edited_df)
-    if len(tks) == 0:
-        st.error("Cannot save: please input at least one valid ticker.")
-    else:
-        maybe_save_portfolio(tks, rws, "Save button")
+    if tks:
+        name = resolve_name_and_title(portfolio_name_title)
+        w = determine_weights(tks, rws, weight_mode)
+        ok, msg = save_portfolio(name, name, tks, w, initial_capital, start_dt, end_dt, interval)
+        st.success(msg) if ok else st.error(msg)
 
-# ------------------ Run button (also auto-save) ------------------
 if run_clicked:
-    tickers, raw_weights = parse_from_editor(edited_df)
-    if len(tickers) == 0:
-        st.error("Please input at least one valid ticker.")
-    else:
-        maybe_save_portfolio(tickers, raw_weights, "Run Portfolio Simulation")
-        run_simulation(tickers, raw_weights)
+    tks, rws = parse_from_editor(edited_df)
+    if tks: run_simulation(tks, rws)
 elif st.session_state.get("auto_run_after_load", False):
-    tickers, raw_weights = parse_from_editor(edited_df)
-    if len(tickers) > 0:
-        run_simulation(tickers, raw_weights)
+    tks, rws = parse_from_editor(edited_df)
+    if tks: run_simulation(tks, rws)
     st.session_state["auto_run_after_load"] = False
+
+def resolve_name_and_title(raw):
+    return raw.strip() if raw.strip() else generate_untitled_name()
